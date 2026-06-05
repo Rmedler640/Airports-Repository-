@@ -9,19 +9,23 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const CACHE_DIR = path.join(__dirname, 'data', 'cache');
 
-// Lazy client init — read key at call time so Railway env vars are always fresh
+// Debug: log env at startup
+console.log('[startup] PORT:', PORT);
+console.log('[startup] ANTHROPIC_API_KEY set:', !!process.env.ANTHROPIC_API_KEY);
+if (process.env.ANTHROPIC_API_KEY) {
+  console.log('[startup] ANTHROPIC_API_KEY prefix:', process.env.ANTHROPIC_API_KEY.slice(0, 14));
+}
+
 function getClient() {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key || !key.startsWith('sk-ant-')) {
-    throw new Error(`ANTHROPIC_API_KEY is missing or invalid (got: ${key ? key.slice(0,10) + '...' : 'undefined'})`);
-  }
+  if (!key) throw new Error('ANTHROPIC_API_KEY is not set');
   return new Anthropic({ apiKey: key });
 }
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function getTodayKey() {
   const d = new Date();
@@ -44,7 +48,6 @@ function seededShuffle(arr, seed) {
 }
 
 function dateSeed(dateKey) {
-  // Convert YYYY-MM-DD to a stable integer seed
   return dateKey.split('-').reduce((acc, n) => acc * 10000 + parseInt(n), 0);
 }
 
@@ -54,12 +57,12 @@ async function generateHint(airport) {
   const msg = await getClient().messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 300,
-    system: `You are an aviation trivia writer for a daily airport guessing game called AeroGuess. 
+    system: `You are an aviation trivia writer for a daily airport guessing game called AeroGuess.
 Generate a single punchy hint about the given airport. Rules:
 - NEVER mention the airport's IATA code, full name, or city name directly
 - Focus on ONE vivid, specific fact: geography, runway layout, famous history, airline significance, nearby landmark, architectural feature, elevation, a record it holds, or an unusual quirk
 - Wrap the most distinctive phrase in <strong> tags
-- Keep it to 2–3 sentences maximum
+- Keep it to 2-3 sentences maximum
 - Be specific — avoid generic phrases like "busy airport" or "serves millions"
 - Output ONLY the hint HTML with no preamble or explanation`,
     messages: [{ role: 'user', content: `Airport: ${airport.name}, ${airport.city}, ${airport.state} (${airport.code})` }]
@@ -71,7 +74,7 @@ async function generateExtraHint(airport, mainHint) {
   const msg = await getClient().messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 200,
-    system: `You are an aviation trivia writer. Generate a SHORT bonus hint about the airport — reveal something clearly different from the main hint already shown. You MAY mention the US state or general region but NOT the city or airport name/code. Keep it to 1–2 sentences. Output only the hint text, no HTML tags, no preamble.`,
+    system: `You are an aviation trivia writer. Generate a SHORT bonus hint about the airport — reveal something clearly different from the main hint already shown. You MAY mention the US state or general region but NOT the city or airport name/code. Keep it to 1-2 sentences. Output only the hint text, no HTML tags, no preamble.`,
     messages: [{ role: 'user', content: `Airport: ${airport.name} (${airport.code}), ${airport.city}, ${airport.state}.\nMain hint already shown: "${mainHint.replace(/<[^>]+>/g, '')}"\nWrite a different clue.` }]
   });
   return msg.content[0].text.trim();
@@ -86,7 +89,6 @@ async function buildDailyCache(dateKey) {
   const shuffled = seededShuffle(AIRPORTS, seed);
   const selected = shuffled.slice(0, 5);
 
-  // Generate hints in parallel
   const hints = await Promise.all(selected.map(ap => generateHint(ap)));
 
   const daily = selected.map((ap, i) => ({
@@ -126,7 +128,7 @@ async function getDailyData(dateKey) {
   return buildDailyCache(dateKey);
 }
 
-// ── Pre-warm: build today's cache on startup, then schedule midnight refresh ──
+// ── Midnight refresh scheduler ────────────────────────────────────────────────
 
 async function scheduleDaily() {
   const todayKey = getTodayKey();
@@ -137,7 +139,6 @@ async function scheduleDaily() {
     console.error('[startup] Failed to load daily data:', e.message);
   }
 
-  // Recalculate ms until midnight UTC and schedule next build
   function msUntilMidnightUTC() {
     const now = new Date();
     const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
@@ -146,7 +147,7 @@ async function scheduleDaily() {
 
   async function refreshAtMidnight() {
     const wait = msUntilMidnightUTC();
-    console.log(`[scheduler] Next refresh in ${Math.round(wait/60000)} minutes`);
+    console.log(`[scheduler] Next refresh in ${Math.round(wait / 60000)} minutes`);
     setTimeout(async () => {
       const nextKey = getTodayKey();
       try {
@@ -155,7 +156,7 @@ async function scheduleDaily() {
       } catch (e) {
         console.error('[scheduler] Refresh failed:', e.message);
       }
-      refreshAtMidnight(); // reschedule for the following day
+      refreshAtMidnight();
     }, wait);
   }
 
@@ -164,32 +165,27 @@ async function scheduleDaily() {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
-// GET /api/daily — returns today's 5 airports with hints
 app.get('/api/daily', async (req, res) => {
   try {
     const dateKey = getTodayKey();
     const data = await getDailyData(dateKey);
-    // Strip full name/city from response so client can't trivially read the answer
     const sanitized = {
       date: data.date,
       airports: data.airports.map(a => ({
-        code: a.code,       // revealed after guess
+        code: a.code,
         lat: a.lat,
         lon: a.lon,
         zoom: a.zoom,
         hint: a.hint,
-        // name/city intentionally omitted — sent only after correct guess or round end
-        _reveal: { name: a.name, city: a.city, state: a.state }
       }))
     };
     res.json(sanitized);
   } catch (e) {
     console.error('/api/daily error:', e.message);
-    res.status(500).json({ error: 'Failed to load daily challenge' });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// POST /api/guess — validate a guess server-side
 app.post('/api/guess', async (req, res) => {
   try {
     const { date, roundIndex, guess } = req.body;
@@ -205,7 +201,7 @@ app.post('/api/guess', async (req, res) => {
       g === airport.code ||
       g === airport.city.toUpperCase() ||
       g === airport.name.toUpperCase() ||
-      airport.name.toUpperCase().includes(g) && g.length > 4 ||
+      (airport.name.toUpperCase().includes(g) && g.length > 4) ||
       airport.city.toUpperCase().split(',')[0].trim() === g;
 
     res.json({
@@ -218,7 +214,6 @@ app.post('/api/guess', async (req, res) => {
   }
 });
 
-// POST /api/hint — AI-generated extra hint for a round
 app.post('/api/hint', async (req, res) => {
   try {
     const { date, roundIndex } = req.body;
@@ -235,7 +230,6 @@ app.post('/api/hint', async (req, res) => {
   }
 });
 
-// POST /api/reveal — reveal full airport info after round ends
 app.post('/api/reveal', async (req, res) => {
   try {
     const { date, roundIndex } = req.body;
@@ -249,12 +243,10 @@ app.post('/api/reveal', async (req, res) => {
   }
 });
 
-// GET /api/airports — full airport list for autocomplete
 app.get('/api/airports', (req, res) => {
   res.json(AIRPORTS.map(a => ({ code: a.code, name: a.name, city: a.city, state: a.state })));
 });
 
-// GET /api/status — health check + diagnostics
 app.get('/api/status', (req, res) => {
   const todayKey = getTodayKey();
   const key = process.env.ANTHROPIC_API_KEY;
@@ -263,13 +255,10 @@ app.get('/api/status', (req, res) => {
     today: todayKey,
     cached: fs.existsSync(getCachePath(todayKey)),
     totalAirports: AIRPORTS.length,
-    apiKey: key ? `${key.slice(0, 10)}... (length: ${key.length})` : 'NOT SET',
-    nodeEnv: process.env.NODE_ENV || 'not set',
-    port: PORT,
+    apiKey: key ? `${key.slice(0, 14)}... (length: ${key.length})` : 'NOT SET',
   });
 });
 
-// Serve index.html for all non-API routes (SPA)
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -277,7 +266,7 @@ app.get('*', (req, res) => {
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, async () => {
-  console.log(`\n✈  AeroGuess server running on http://localhost:${PORT}`);
-  console.log(`   Airport database: ${AIRPORTS.length} Part 139 airports`);
+  console.log(`\n✈  AeroGuess running on port ${PORT}`);
+  console.log(`   Airports: ${AIRPORTS.length}`);
   await scheduleDaily();
 });
