@@ -9,12 +9,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const CACHE_DIR = path.join(__dirname, 'data', 'cache');
 
-// Debug: log env at startup
+console.log('[startup] AeroGuess starting...');
 console.log('[startup] PORT:', PORT);
-console.log('[startup] ANTHROPIC_API_KEY set:', !!process.env.ANTHROPIC_API_KEY);
-if (process.env.ANTHROPIC_API_KEY) {
-  console.log('[startup] ANTHROPIC_API_KEY prefix:', process.env.ANTHROPIC_API_KEY.slice(0, 14));
-}
+console.log('[startup] API key set:', !!process.env.ANTHROPIC_API_KEY);
 
 function getClient() {
   const key = process.env.ANTHROPIC_API_KEY;
@@ -51,135 +48,145 @@ function dateSeed(dateKey) {
   return dateKey.split('-').reduce((acc, n) => acc * 10000 + parseInt(n), 0);
 }
 
-// ── AI Hint Generation ────────────────────────────────────────────────────────
+// ── AI with retry ─────────────────────────────────────────────────────────────
+
+async function callWithRetry(fn, retries = 3, delayMs = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      console.error(`[retry ${i+1}/${retries}] ${e.message}`);
+      if (i < retries - 1) await new Promise(r => setTimeout(r, delayMs * (i + 1)));
+      else throw e;
+    }
+  }
+}
 
 async function generateHint(airport) {
-  const msg = await getClient().messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 300,
-    system: `You are an aviation trivia writer for a daily airport guessing game called AeroGuess.
+  return callWithRetry(async () => {
+    const msg = await getClient().messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 300,
+      system: `You are an aviation trivia writer for a daily airport guessing game called AeroGuess.
 Generate a single punchy hint about the given airport. Rules:
 - NEVER mention the airport's IATA code, full name, or city name directly
-- Focus on ONE vivid, specific fact: geography, runway layout, famous history, airline significance, nearby landmark, architectural feature, elevation, a record it holds, or an unusual quirk
+- Focus on ONE vivid specific fact: geography, runway layout, history, airline significance, nearby landmark, architectural feature, elevation, a record, or quirk
 - Wrap the most distinctive phrase in <strong> tags
-- Keep it to 2-3 sentences maximum
-- Be specific — avoid generic phrases like "busy airport" or "serves millions"
-- Output ONLY the hint HTML with no preamble or explanation`,
-    messages: [{ role: 'user', content: `Airport: ${airport.name}, ${airport.city}, ${airport.state} (${airport.code})` }]
+- 2-3 sentences max
+- Output ONLY the hint HTML, no preamble`,
+      messages: [{ role: 'user', content: `Airport: ${airport.name}, ${airport.city}, ${airport.state} (${airport.code})` }]
+    });
+    return msg.content[0].text.trim();
   });
-  return msg.content[0].text.trim();
 }
 
 async function generateExtraHint(airport, mainHint) {
-  const msg = await getClient().messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 200,
-    system: `You are an aviation trivia writer. Generate a SHORT bonus hint about the airport — reveal something clearly different from the main hint already shown. You MAY mention the US state or general region but NOT the city or airport name/code. Keep it to 1-2 sentences. Output only the hint text, no HTML tags, no preamble.`,
-    messages: [{ role: 'user', content: `Airport: ${airport.name} (${airport.code}), ${airport.city}, ${airport.state}.\nMain hint already shown: "${mainHint.replace(/<[^>]+>/g, '')}"\nWrite a different clue.` }]
+  return callWithRetry(async () => {
+    const msg = await getClient().messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 200,
+      system: `You are an aviation trivia writer. Generate a SHORT bonus hint — something different from the main hint. You MAY mention the US state or region but NOT the city or airport name/code. 1-2 sentences. Plain text only, no HTML, no preamble.`,
+      messages: [{ role: 'user', content: `Airport: ${airport.name} (${airport.code}), ${airport.city}, ${airport.state}.\nMain hint: "${mainHint.replace(/<[^>]+>/g, '')}"\nWrite a different clue.` }]
+    });
+    return msg.content[0].text.trim();
   });
-  return msg.content[0].text.trim();
 }
 
-// ── Daily Cache Generation ────────────────────────────────────────────────────
+// ── Fallback hints (used if API fails) ───────────────────────────────────────
+
+function fallbackHint(airport) {
+  return `A <strong>FAA Part 139 certificated airport</strong> serving scheduled commercial airline operations in ${airport.state}.`;
+}
+
+// ── Daily Cache ───────────────────────────────────────────────────────────────
+
+// In-progress build tracker so concurrent requests don't trigger multiple builds
+const building = {};
 
 async function buildDailyCache(dateKey) {
-  console.log(`[${dateKey}] Building daily cache...`);
+  if (building[dateKey]) {
+    // Wait for the in-progress build
+    await building[dateKey];
+    return JSON.parse(fs.readFileSync(getCachePath(dateKey), 'utf8'));
+  }
 
-  const seed = dateSeed(dateKey);
-  const shuffled = seededShuffle(AIRPORTS, seed);
-  const selected = shuffled.slice(0, 5);
+  let resolve;
+  building[dateKey] = new Promise(r => { resolve = r; });
 
-  const hints = await Promise.all(selected.map(ap => generateHint(ap)));
+  try {
+    console.log(`[${dateKey}] Building daily cache...`);
+    const seed = dateSeed(dateKey);
+    const selected = seededShuffle(AIRPORTS, seed).slice(0, 5);
 
-  const daily = selected.map((ap, i) => ({
-    code: ap.code,
-    name: ap.name,
-    city: ap.city,
-    state: ap.state,
-    lat: ap.lat,
-    lon: ap.lon,
-    zoom: ap.zoom,
-    hint: hints[i]
-  }));
+    // Generate hints — fall back to static hint if API fails
+    const hints = await Promise.all(selected.map(async ap => {
+      try {
+        return await generateHint(ap);
+      } catch (e) {
+        console.error(`[hint fallback] ${ap.code}: ${e.message}`);
+        return fallbackHint(ap);
+      }
+    }));
 
-  const payload = {
-    date: dateKey,
-    generated: new Date().toISOString(),
-    airports: daily
-  };
+    const payload = {
+      date: dateKey,
+      generated: new Date().toISOString(),
+      airports: selected.map((ap, i) => ({
+        code: ap.code, name: ap.name, city: ap.city, state: ap.state,
+        lat: ap.lat, lon: ap.lon, zoom: ap.zoom, hint: hints[i]
+      }))
+    };
 
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-  fs.writeFileSync(getCachePath(dateKey), JSON.stringify(payload, null, 2));
-  console.log(`[${dateKey}] Cache built: ${daily.map(a => a.code).join(', ')}`);
-
-  return payload;
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(getCachePath(dateKey), JSON.stringify(payload, null, 2));
+    console.log(`[${dateKey}] Cache built: ${payload.airports.map(a => a.code).join(', ')}`);
+    return payload;
+  } finally {
+    resolve();
+    delete building[dateKey];
+  }
 }
 
 async function getDailyData(dateKey) {
   const cachePath = getCachePath(dateKey);
   if (fs.existsSync(cachePath)) {
     try {
-      const raw = fs.readFileSync(cachePath, 'utf8');
-      return JSON.parse(raw);
+      return JSON.parse(fs.readFileSync(cachePath, 'utf8'));
     } catch (e) {
-      console.error('Cache read error, rebuilding:', e.message);
+      console.error('Cache parse error:', e.message);
     }
   }
   return buildDailyCache(dateKey);
 }
 
-// ── Midnight refresh scheduler ────────────────────────────────────────────────
+// ── Midnight scheduler ────────────────────────────────────────────────────────
 
-async function scheduleDaily() {
-  const todayKey = getTodayKey();
-  try {
-    await getDailyData(todayKey);
-    console.log(`[startup] Daily data ready for ${todayKey}`);
-  } catch (e) {
-    console.error('[startup] Failed to load daily data:', e.message);
-  }
-
-  function msUntilMidnightUTC() {
-    const now = new Date();
-    const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-    return midnight - now;
-  }
-
-  async function refreshAtMidnight() {
-    const wait = msUntilMidnightUTC();
-    console.log(`[scheduler] Next refresh in ${Math.round(wait / 60000)} minutes`);
-    setTimeout(async () => {
-      const nextKey = getTodayKey();
-      try {
-        await buildDailyCache(nextKey);
-        console.log(`[scheduler] Refreshed cache for ${nextKey}`);
-      } catch (e) {
-        console.error('[scheduler] Refresh failed:', e.message);
-      }
-      refreshAtMidnight();
-    }, wait);
-  }
-
-  refreshAtMidnight();
+function scheduleMidnightRefresh() {
+  const now = new Date();
+  const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+  const wait = midnight - now;
+  console.log(`[scheduler] Next refresh in ${Math.round(wait / 60000)} min`);
+  setTimeout(async () => {
+    try {
+      await buildDailyCache(getTodayKey());
+    } catch (e) {
+      console.error('[scheduler] Refresh failed:', e.message);
+    }
+    scheduleMidnightRefresh();
+  }, wait);
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 app.get('/api/daily', async (req, res) => {
   try {
-    const dateKey = getTodayKey();
-    const data = await getDailyData(dateKey);
-    const sanitized = {
+    const data = await getDailyData(getTodayKey());
+    res.json({
       date: data.date,
       airports: data.airports.map(a => ({
-        code: a.code,
-        lat: a.lat,
-        lon: a.lon,
-        zoom: a.zoom,
-        hint: a.hint,
+        code: a.code, lat: a.lat, lon: a.lon, zoom: a.zoom, hint: a.hint
       }))
-    };
-    res.json(sanitized);
+    });
   } catch (e) {
     console.error('/api/daily error:', e.message);
     res.status(500).json({ error: e.message });
@@ -189,12 +196,9 @@ app.get('/api/daily', async (req, res) => {
 app.post('/api/guess', async (req, res) => {
   try {
     const { date, roundIndex, guess } = req.body;
-    if (roundIndex < 0 || roundIndex > 4) return res.status(400).json({ error: 'Invalid round' });
-
-    const dateKey = date || getTodayKey();
-    const data = await getDailyData(dateKey);
+    const data = await getDailyData(date || getTodayKey());
     const airport = data.airports[roundIndex];
-    if (!airport) return res.status(400).json({ error: 'Invalid round index' });
+    if (!airport) return res.status(400).json({ error: 'Invalid round' });
 
     const g = (guess || '').toUpperCase().trim();
     const correct =
@@ -209,7 +213,6 @@ app.post('/api/guess', async (req, res) => {
       reveal: correct ? { code: airport.code, name: airport.name, city: airport.city, state: airport.state } : null
     });
   } catch (e) {
-    console.error('/api/guess error:', e.message);
     res.status(500).json({ error: 'Guess check failed' });
   }
 });
@@ -217,15 +220,12 @@ app.post('/api/guess', async (req, res) => {
 app.post('/api/hint', async (req, res) => {
   try {
     const { date, roundIndex } = req.body;
-    const dateKey = date || getTodayKey();
-    const data = await getDailyData(dateKey);
+    const data = await getDailyData(date || getTodayKey());
     const airport = data.airports[roundIndex];
     if (!airport) return res.status(400).json({ error: 'Invalid round' });
-
-    const extra = await generateExtraHint(airport, airport.hint);
-    res.json({ hint: extra });
+    const hint = await generateExtraHint(airport, airport.hint);
+    res.json({ hint });
   } catch (e) {
-    console.error('/api/hint error:', e.message);
     res.status(500).json({ error: 'Could not generate hint' });
   }
 });
@@ -233,8 +233,7 @@ app.post('/api/hint', async (req, res) => {
 app.post('/api/reveal', async (req, res) => {
   try {
     const { date, roundIndex } = req.body;
-    const dateKey = date || getTodayKey();
-    const data = await getDailyData(dateKey);
+    const data = await getDailyData(date || getTodayKey());
     const airport = data.airports[roundIndex];
     if (!airport) return res.status(400).json({ error: 'Invalid round' });
     res.json({ code: airport.code, name: airport.name, city: airport.city, state: airport.state });
@@ -265,8 +264,9 @@ app.get('*', (req, res) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, async () => {
-  console.log(`\n✈  AeroGuess running on port ${PORT}`);
-  console.log(`   Airports: ${AIRPORTS.length}`);
-  await scheduleDaily();
+app.listen(PORT, () => {
+  console.log(`✈  AeroGuess running on port ${PORT}`);
+  console.log(`   ${AIRPORTS.length} airports in database`);
+  // Do NOT block startup on cache build — do it lazily on first request
+  scheduleMidnightRefresh();
 });
