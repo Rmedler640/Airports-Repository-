@@ -174,7 +174,7 @@ Currently: 2000 pts → 1500 → 1000 → 500 (based on guesses needed). Tweak `
 - **Storage**: File-based daily cache + browser localStorage
 
 ---
-
+ 
 ## License
 
 MIT
