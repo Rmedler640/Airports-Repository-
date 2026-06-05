@@ -65,7 +65,7 @@ async function callWithRetry(fn, retries = 3, delayMs = 2000) {
 async function generateHint(airport) {
   return callWithRetry(async () => {
     const msg = await getClient().messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-3-5-sonnet-20241022',
       max_tokens: 300,
       system: `You are an aviation trivia writer for a daily airport guessing game called AeroGuess.
 Generate a single punchy hint about the given airport. Rules:
@@ -83,7 +83,7 @@ Generate a single punchy hint about the given airport. Rules:
 async function generateExtraHint(airport, mainHint) {
   return callWithRetry(async () => {
     const msg = await getClient().messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-3-5-sonnet-20241022',
       max_tokens: 200,
       system: `You are an aviation trivia writer. Generate a SHORT bonus hint — something different from the main hint. You MAY mention the US state or region but NOT the city or airport name/code. 1-2 sentences. Plain text only, no HTML, no preamble.`,
       messages: [{ role: 'user', content: `Airport: ${airport.name} (${airport.code}), ${airport.city}, ${airport.state}.\nMain hint: "${mainHint.replace(/<[^>]+>/g, '')}"\nWrite a different clue.` }]
