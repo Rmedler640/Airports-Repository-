@@ -8,7 +8,15 @@ const AIRPORTS = require('./data/airports');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const CACHE_DIR = path.join(__dirname, 'data', 'cache');
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// Lazy client init — read key at call time so Railway env vars are always fresh
+function getClient() {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key || !key.startsWith('sk-ant-')) {
+    throw new Error(`ANTHROPIC_API_KEY is missing or invalid (got: ${key ? key.slice(0,10) + '...' : 'undefined'})`);
+  }
+  return new Anthropic({ apiKey: key });
+}
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -43,7 +51,7 @@ function dateSeed(dateKey) {
 // ── AI Hint Generation ────────────────────────────────────────────────────────
 
 async function generateHint(airport) {
-  const msg = await client.messages.create({
+  const msg = await getClient().messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 300,
     system: `You are an aviation trivia writer for a daily airport guessing game called AeroGuess. 
@@ -60,7 +68,7 @@ Generate a single punchy hint about the given airport. Rules:
 }
 
 async function generateExtraHint(airport, mainHint) {
-  const msg = await client.messages.create({
+  const msg = await getClient().messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 200,
     system: `You are an aviation trivia writer. Generate a SHORT bonus hint about the airport — reveal something clearly different from the main hint already shown. You MAY mention the US state or general region but NOT the city or airport name/code. Keep it to 1–2 sentences. Output only the hint text, no HTML tags, no preamble.`,
@@ -246,14 +254,18 @@ app.get('/api/airports', (req, res) => {
   res.json(AIRPORTS.map(a => ({ code: a.code, name: a.name, city: a.city, state: a.state })));
 });
 
-// GET /api/status — health check + cache status
+// GET /api/status — health check + diagnostics
 app.get('/api/status', (req, res) => {
   const todayKey = getTodayKey();
+  const key = process.env.ANTHROPIC_API_KEY;
   res.json({
     status: 'ok',
     today: todayKey,
     cached: fs.existsSync(getCachePath(todayKey)),
-    totalAirports: AIRPORTS.length
+    totalAirports: AIRPORTS.length,
+    apiKey: key ? `${key.slice(0, 10)}... (length: ${key.length})` : 'NOT SET',
+    nodeEnv: process.env.NODE_ENV || 'not set',
+    port: PORT,
   });
 });
 
