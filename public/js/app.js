@@ -364,7 +364,7 @@ function showResult(correct, pts, reveal) {
   updateStats(correct);
 }
 
-$('next-btn').addEventListener('click', () => startRound(state.curRound + 1));
+$('next-btn').addEventListener('click', () => startRound(state.completed));
 
 // ── Final Screen ──────────────────────────────────────────────────────────────
 function showFinal() {
