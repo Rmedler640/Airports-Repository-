@@ -50,7 +50,7 @@ function dateSeed(dateKey) {
 
 // ── AI with retry ─────────────────────────────────────────────────────────────
 
-async function callWithRetry(fn, retries = 3, delayMs = 2000) {
+async function callWithRetry(fn, retries = 4, delayMs = 3000) {
   for (let i = 0; i < retries; i++) {
     try {
       return await fn();
@@ -92,7 +92,9 @@ async function generateExtraHint(airport, mainHint) {
   });
 }
 
-// ── Fallback hints (used if API fails) ───────────────────────────────────────
+function isFallbackHint(hint) {
+  return hint && hint.includes('FAA Part 139 certificated airport');
+}
 
 function fallbackHint(airport) {
   return `A <strong>FAA Part 139 certificated airport</strong> serving scheduled commercial airline operations in ${airport.state}.`;
@@ -100,12 +102,10 @@ function fallbackHint(airport) {
 
 // ── Daily Cache ───────────────────────────────────────────────────────────────
 
-// In-progress build tracker so concurrent requests don't trigger multiple builds
 const building = {};
 
-async function buildDailyCache(dateKey) {
-  if (building[dateKey]) {
-    // Wait for the in-progress build
+async function buildDailyCache(dateKey, forceRegenHints = false) {
+  if (building[dateKey] && !forceRegenHints) {
     await building[dateKey];
     return JSON.parse(fs.readFileSync(getCachePath(dateKey), 'utf8'));
   }
@@ -114,23 +114,43 @@ async function buildDailyCache(dateKey) {
   building[dateKey] = new Promise(r => { resolve = r; });
 
   try {
-    console.log(`[${dateKey}] Building daily cache...`);
+    console.log(`[${dateKey}] Building daily cache... (forceRegen: ${forceRegenHints})`);
     const seed = dateSeed(dateKey);
     const selected = seededShuffle(AIRPORTS, seed).slice(0, 5);
 
-    // Generate hints — fall back to static hint if API fails
-    const hints = await Promise.all(selected.map(async ap => {
+    // If cache exists and we're just regenerating hints, keep existing good hints
+    let existingHints = [];
+    if (forceRegenHints && fs.existsSync(getCachePath(dateKey))) {
       try {
-        return await generateHint(ap);
+        const existing = JSON.parse(fs.readFileSync(getCachePath(dateKey), 'utf8'));
+        existingHints = existing.airports.map(a => a.hint);
+      } catch {}
+    }
+
+    const hints = await Promise.all(selected.map(async (ap, i) => {
+      // Keep existing hint if it's a good AI-generated one
+      if (existingHints[i] && !isFallbackHint(existingHints[i])) {
+        return existingHints[i];
+      }
+      try {
+        const hint = await generateHint(ap);
+        console.log(`[hint OK] ${ap.code}`);
+        return hint;
       } catch (e) {
         console.error(`[hint fallback] ${ap.code}: ${e.message}`);
         return fallbackHint(ap);
       }
     }));
 
+    const allFallback = hints.every(isFallbackHint);
+    if (allFallback) {
+      console.warn('[cache] All hints are fallbacks — API may be down, will retry next request');
+    }
+
     const payload = {
       date: dateKey,
       generated: new Date().toISOString(),
+      allFallback,
       airports: selected.map((ap, i) => ({
         code: ap.code, name: ap.name, city: ap.city, state: ap.state,
         lat: ap.lat, lon: ap.lon, zoom: ap.zoom, hint: hints[i]
@@ -139,7 +159,7 @@ async function buildDailyCache(dateKey) {
 
     fs.mkdirSync(CACHE_DIR, { recursive: true });
     fs.writeFileSync(getCachePath(dateKey), JSON.stringify(payload, null, 2));
-    console.log(`[${dateKey}] Cache built: ${payload.airports.map(a => a.code).join(', ')}`);
+    console.log(`[${dateKey}] Cache saved: ${payload.airports.map(a => a.code).join(', ')}`);
     return payload;
   } finally {
     resolve();
@@ -149,14 +169,48 @@ async function buildDailyCache(dateKey) {
 
 async function getDailyData(dateKey) {
   const cachePath = getCachePath(dateKey);
+
   if (fs.existsSync(cachePath)) {
     try {
-      return JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+      const cached = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+      // If all hints are fallbacks, try to regenerate silently in background
+      if (cached.allFallback) {
+        console.log('[cache] Fallback hints detected — regenerating in background...');
+        buildDailyCache(dateKey, true).catch(e =>
+          console.error('[cache] Background regen failed:', e.message)
+        );
+      }
+      return cached;
     } catch (e) {
       console.error('Cache parse error:', e.message);
     }
   }
+
   return buildDailyCache(dateKey);
+}
+
+// ── Self-ping to keep Render awake ────────────────────────────────────────────
+
+function startKeepAlive() {
+  const url = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
+  if (!url) {
+    console.log('[keepalive] No RENDER_EXTERNAL_URL set — skipping self-ping');
+    return;
+  }
+  const interval = 14 * 60 * 1000; // every 14 minutes
+  setInterval(async () => {
+    try {
+      const http = require('https');
+      http.get(url + '/api/status', res => {
+        console.log('[keepalive] Ping OK:', res.statusCode);
+      }).on('error', e => {
+        console.error('[keepalive] Ping failed:', e.message);
+      });
+    } catch (e) {
+      console.error('[keepalive] Error:', e.message);
+    }
+  }, interval);
+  console.log(`[keepalive] Pinging ${url} every 14 minutes`);
 }
 
 // ── Midnight scheduler ────────────────────────────────────────────────────────
@@ -226,6 +280,7 @@ app.post('/api/hint', async (req, res) => {
     const hint = await generateExtraHint(airport, airport.hint);
     res.json({ hint });
   } catch (e) {
+    console.error('/api/hint error:', e.message);
     res.status(500).json({ error: 'Could not generate hint' });
   }
 });
@@ -254,8 +309,18 @@ app.get('/api/status', (req, res) => {
     today: todayKey,
     cached: fs.existsSync(getCachePath(todayKey)),
     totalAirports: AIRPORTS.length,
-    apiKey: key ? `${key.slice(0, 14)}... (length: ${key.length})` : 'NOT SET',
+    apiKey: key ? key.slice(0, 14) + '...' : 'NOT SET',
   });
+});
+
+// Force regenerate hints for today (useful after wake-up)
+app.post('/api/admin/regen', async (req, res) => {
+  try {
+    const data = await buildDailyCache(getTodayKey(), true);
+    res.json({ ok: true, airports: data.airports.map(a => ({ code: a.code, hint: a.hint.slice(0, 60) })) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('*', (req, res) => {
@@ -267,6 +332,16 @@ app.get('*', (req, res) => {
 app.listen(PORT, () => {
   console.log(`✈  AeroGuess running on port ${PORT}`);
   console.log(`   ${AIRPORTS.length} airports in database`);
-  // Do NOT block startup on cache build — do it lazily on first request
   scheduleMidnightRefresh();
+  startKeepAlive();
+  // Warm up cache on startup, non-blocking
+  getDailyData(getTodayKey()).then(data => {
+    const fallbacks = data.airports.filter(a => isFallbackHint(a.hint)).length;
+    if (fallbacks > 0) {
+      console.log(`[startup] ${fallbacks} fallback hints detected, rebuilding...`);
+      buildDailyCache(getTodayKey(), true).catch(e =>
+        console.error('[startup] Regen failed:', e.message)
+      );
+    }
+  }).catch(e => console.error('[startup] Cache warm failed:', e.message));
 });
