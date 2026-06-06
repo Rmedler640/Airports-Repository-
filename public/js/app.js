@@ -1,9 +1,8 @@
 /* ── AeroGuess Frontend ───────────────────────────────────────────────────── */
 
-// ── State ─────────────────────────────────────────────────────────────────────
 const state = {
-  daily: null,         // API response: { date, airports[] }
-  airports: [],        // full airport list for autocomplete
+  daily: null,
+  airports: [],
   curRound: 0,
   score: 0,
   guesses: 0,
@@ -15,10 +14,8 @@ const state = {
   map: null,
 };
 
-// ── DOM refs ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
-// ── Storage helpers ───────────────────────────────────────────────────────────
 function lsGet(key, def) {
   try { return JSON.parse(localStorage.getItem(key) ?? JSON.stringify(def)); }
   catch { return def; }
@@ -27,16 +24,14 @@ function lsSet(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 }
 
-// ── Screen switcher ───────────────────────────────────────────────────────────
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  $(`${id}-screen`).classList.add('active');
+  $(id + '-screen').classList.add('active');
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   if (id === 'play' || id === 'load') $('t-play').classList.add('active');
   if (id === 'lb') { $('t-lb').classList.add('active'); renderLeaderboard(); }
 }
 
-// ── Progress dots ─────────────────────────────────────────────────────────────
 function updateDots() {
   const el = $('pdots');
   el.innerHTML = '';
@@ -50,52 +45,36 @@ function updateDots() {
   }
 }
 
-// ── Loading progress bar helper ───────────────────────────────────────────────
 function setLoadProgress(pct) {
   $('load-fill').style.width = pct + '%';
 }
 
-// ── INIT: Fetch daily data ────────────────────────────────────────────────────
 async function init() {
   showScreen('load');
-
-  // Animate load bar
   let prog = 0;
   const progInterval = setInterval(() => {
     prog = Math.min(prog + Math.random() * 8, 88);
     setLoadProgress(prog);
   }, 200);
-
-  const loadMsgs = [
-    'Requesting satellite imagery…',
-    'Generating trivia hints…',
-    'Checking runway configurations…',
-    'Almost cleared for takeoff…',
-  ];
+  const loadMsgs = ['Requesting satellite imagery…','Generating trivia hints…','Checking runway configurations…','Almost cleared for takeoff…'];
   let msgIdx = 0;
   const msgInterval = setInterval(() => {
     msgIdx = (msgIdx + 1) % loadMsgs.length;
     $('load-msg').textContent = loadMsgs[msgIdx];
   }, 1200);
-
   try {
-    // Fetch today's 5 airports and full airport list in parallel
     const [dailyRes, airportsRes] = await Promise.all([
       fetch('/api/daily'),
       fetch('/api/airports'),
     ]);
-
-    if (!dailyRes.ok) throw new Error(`Daily API ${dailyRes.status}`);
-    if (!airportsRes.ok) throw new Error(`Airports API ${airportsRes.status}`);
-
+    if (!dailyRes.ok) throw new Error('Daily API ' + dailyRes.status);
+    if (!airportsRes.ok) throw new Error('Airports API ' + airportsRes.status);
     state.daily = await dailyRes.json();
     state.airports = await airportsRes.json();
-
     clearInterval(progInterval);
     clearInterval(msgInterval);
     setLoadProgress(100);
-
-    await delay(400);
+    await new Promise(r => setTimeout(r, 400));
     loadStats();
     startRound(0);
     showScreen('play');
@@ -108,8 +87,8 @@ async function init() {
   }
 }
 
-// ── Round management ──────────────────────────────────────────────────────────
 function startRound(idx) {
+  console.log('startRound called with idx:', idx, 'completed:', state.completed);
   if (idx >= 5) { showFinal(); return; }
 
   state.curRound = idx;
@@ -118,8 +97,9 @@ function startRound(idx) {
   state.hintUsed = false;
 
   const ap = state.daily.airports[idx];
+  console.log('Loading airport:', ap);
 
-  $('round-title').textContent = `ROUND ${idx + 1} OF 5`;
+  $('round-title').textContent = 'ROUND ' + (idx + 1) + ' OF 5';
   $('htext').innerHTML = ap.hint;
   $('ai-hint').style.display = 'none';
   $('ai-hint').textContent = '';
@@ -140,10 +120,8 @@ function startRound(idx) {
   initMap(ap);
 }
 
-// ── Map ───────────────────────────────────────────────────────────────────────
 function initMap(ap) {
   if (state.map) { state.map.remove(); state.map = null; }
-
   state.map = L.map('amap', {
     center: [ap.lat, ap.lon],
     zoom: ap.zoom,
@@ -152,11 +130,9 @@ function initMap(ap) {
     dragging: true,
     scrollWheelZoom: false,
   });
-
   L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     maxZoom: 19,
   }).addTo(state.map);
-
   const updateCoords = () => {
     const c = state.map.getCenter();
     $('lat-d').textContent  = 'LAT '  + c.lat.toFixed(4);
@@ -165,12 +141,10 @@ function initMap(ap) {
   };
   state.map.on('moveend zoomend', updateCoords);
   updateCoords();
-
   $('zoom-in').onclick  = () => state.map.zoomIn();
   $('zoom-out').onclick = () => state.map.zoomOut();
 }
 
-// ── Autocomplete ──────────────────────────────────────────────────────────────
 function matchAirports(query) {
   const q = query.toUpperCase().trim();
   if (q.length < 2) return [];
@@ -187,14 +161,11 @@ $('ginput').addEventListener('input', () => {
   $('sbtn').disabled = val.trim().length < 2;
   const matches = matchAirports(val);
   if (matches.length && val.trim().length >= 2) {
-    $('sugg-list').innerHTML = matches.map(a => `
-      <div class="sugg-item" role="option" data-code="${a.code}" tabindex="-1">
-        <div>
-          <div>${a.name}</div>
-          <div class="sugg-city">${a.city}, ${a.state}</div>
-        </div>
-        <span class="sugg-code">${a.code}</span>
-      </div>`).join('');
+    $('sugg-list').innerHTML = matches.map(a =>
+      '<div class="sugg-item" data-code="' + a.code + '">' +
+      '<div><div>' + a.name + '</div><div class="sugg-city">' + a.city + ', ' + a.state + '</div></div>' +
+      '<span class="sugg-code">' + a.code + '</span></div>'
+    ).join('');
     $('sugg-list').style.display = 'block';
   } else {
     $('sugg-list').style.display = 'none';
@@ -220,7 +191,6 @@ $('ginput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !$('sbtn').disabled) $('sbtn').click();
 });
 
-// ── Submit guess ──────────────────────────────────────────────────────────────
 $('sbtn').addEventListener('click', async () => {
   if (state.roundDone) return;
   const val = $('ginput').value.trim();
@@ -231,24 +201,18 @@ $('sbtn').addEventListener('click', async () => {
   $('ginput').value = '';
   $('sugg-list').style.display = 'none';
 
-  // Server-side validation
   let correct = false;
   let reveal = null;
   try {
     const res = await fetch('/api/guess', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        date: state.daily.date,
-        roundIndex: state.curRound,
-        guess: val,
-      }),
+      body: JSON.stringify({ date: state.daily.date, roundIndex: state.curRound, guess: val }),
     });
     const data = await res.json();
     correct = data.correct;
     reveal = data.reveal;
   } catch (e) {
-    // Fallback: client-side check against code only
     correct = val.toUpperCase().trim() === state.daily.airports[state.curRound].code;
   }
 
@@ -261,7 +225,6 @@ $('sbtn').addEventListener('click', async () => {
     state.roundPts.push(pts);
     $('score-val').textContent = state.score;
     if (!reveal) {
-      // fetch reveal separately if guess endpoint didn't return it
       try {
         const r = await fetch('/api/reveal', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -274,7 +237,6 @@ $('sbtn').addEventListener('click', async () => {
   } else if (state.guesses >= state.maxGuesses) {
     state.roundPts.push(0);
     $('score-val').textContent = state.score;
-    // Reveal answer on miss
     let missed = null;
     try {
       const r = await fetch('/api/reveal', {
@@ -285,10 +247,8 @@ $('sbtn').addEventListener('click', async () => {
     } catch {}
     showResult(false, 0, missed);
   } else {
-    // Wrong but can still guess
     $('ginput').disabled = false;
     $('ginput').focus();
-    // sbtn stays disabled until next keystroke
   }
 });
 
@@ -296,24 +256,20 @@ function addGuessRow(val, correct) {
   const log = $('glog');
   const row = document.createElement('div');
   row.className = 'guess-row ' + (correct ? 'right' : 'wrong');
-  row.innerHTML = `<span>${val.toUpperCase()}</span><span>${correct ? '✓' : '✗'}</span>`;
+  row.innerHTML = '<span>' + val.toUpperCase() + '</span><span>' + (correct ? '✓' : '✗') + '</span>';
   log.appendChild(row);
 }
 
-// ── AI Extra Hint ─────────────────────────────────────────────────────────────
 $('xhint-btn').addEventListener('click', async () => {
   if (state.hintUsed) return;
   state.hintUsed = true;
   $('xhint-btn').disabled = true;
   $('xhint-btn').textContent = '⟳ Loading…';
-
   state.score = Math.max(0, state.score - 500);
   $('score-val').textContent = state.score;
-
   const aiBox = $('ai-hint');
   aiBox.style.display = 'block';
   aiBox.innerHTML = '<span class="spin">⟳</span> Generating AI hint…';
-
   try {
     const res = await fetch('/api/hint', {
       method: 'POST',
@@ -323,35 +279,32 @@ $('xhint-btn').addEventListener('click', async () => {
     const data = await res.json();
     aiBox.textContent = '🤖 ' + data.hint;
   } catch {
-    aiBox.textContent = '🤖 Hint unavailable. Try narrowing your guess by country or region.';
+    aiBox.textContent = '🤖 Hint unavailable. Try narrowing your guess by state or region.';
   }
-
   $('xhint-btn').textContent = '📡 HINT USED';
 });
 
-// ── Show Result ───────────────────────────────────────────────────────────────
 function showResult(correct, pts, reveal) {
   state.roundDone = true;
   state.completed++;
 
-  const code = reveal?.code || state.daily.airports[state.curRound].code || '???';
-  const name = reveal ? `${reveal.name} · ${reveal.city}, ${reveal.state}` : 'Airport';
+  const code = (reveal && reveal.code) ? reveal.code : state.daily.airports[state.curRound].code;
+  const name = reveal ? (reveal.name + ' · ' + reveal.city + ', ' + reveal.state) : code;
 
-  $('r-icon').textContent    = correct ? '✅' : '❌';
-  $('r-status').textContent  = correct ? 'CORRECT!' : 'MISSED IT';
-  $('r-status').style.color  = correct ? 'var(--accent)' : 'var(--danger)';
-  $('r-code').textContent    = code;
-  $('r-name').textContent    = name;
-  $('r-pts').textContent     = correct ? `+${pts} PTS` : `Answer: ${code}`;
+  $('r-icon').textContent   = correct ? '✅' : '❌';
+  $('r-status').textContent = correct ? 'CORRECT!' : 'MISSED IT';
+  $('r-status').style.color = correct ? 'var(--accent)' : 'var(--danger)';
+  $('r-code').textContent   = code;
+  $('r-name').textContent   = name;
+  $('r-pts').textContent    = correct ? '+' + pts + ' PTS' : 'Answer: ' + code;
   $('rov').classList.add('show');
   $('rov').setAttribute('aria-hidden', 'false');
 
-  // Pin a marker
-  if (state.map && reveal) {
+  if (state.map) {
     const ap = state.daily.airports[state.curRound];
     L.marker([ap.lat, ap.lon], {
       icon: L.divIcon({
-        html: `<div style="background:var(--accent);color:#0a1628;font-family:'Oswald',sans-serif;font-size:12px;padding:3px 9px;border-radius:3px;font-weight:600;letter-spacing:1px;white-space:nowrap;">✈ ${code}</div>`,
+        html: '<div style="background:var(--accent);color:#0a1628;font-family:Oswald,sans-serif;font-size:12px;padding:3px 9px;border-radius:3px;font-weight:600;letter-spacing:1px;white-space:nowrap;">✈ ' + code + '</div>',
         iconAnchor: [34, 0],
       }),
     }).addTo(state.map);
@@ -361,90 +314,84 @@ function showResult(correct, pts, reveal) {
   $('sbtn').disabled = true;
   $('sbtn').textContent = '✓ DONE';
   updateDots();
-  // stats updated at end of game
 }
 
-$('next-btn').addEventListener('click', () => { const next = state.completed; $('rov').classList.remove('show'); startRound(next); });
+// NEXT button — capture completed count before anything changes
+$('next-btn').addEventListener('click', function() {
+  const nextIdx = state.completed;
+  console.log('Next clicked, going to round:', nextIdx);
+  $('rov').classList.remove('show');
+  startRound(nextIdx);
+});
 
-// ── Final Screen ──────────────────────────────────────────────────────────────
 function showFinal() {
   showScreen('final');
-  updateStats(state.roundPts.some(p => p > 0));
+  updateStats();
   $('f-score').textContent = state.score;
-  $('final-date').textContent = `${new Date().toLocaleDateString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric' })}`;
-
+  $('final-date').textContent = new Date().toLocaleDateString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
   const grid = $('f-grid');
-  grid.innerHTML = state.daily.airports.map((ap, i) => {
-    const pts = state.roundPts[i] ?? 0;
+  grid.innerHTML = state.daily.airports.map(function(ap, i) {
+    const pts = state.roundPts[i] != null ? state.roundPts[i] : 0;
     const cls = pts >= 2000 ? 'perfect' : pts > 0 ? 'good' : 'miss';
-    return `<div class="final-box"><div class="final-code">${ap.code}</div><div class="final-pts ${cls}">${pts}</div></div>`;
+    return '<div class="final-box"><div class="final-code">' + ap.code + '</div><div class="final-pts ' + cls + '">' + pts + '</div></div>';
   }).join('');
 }
 
-// ── Share ─────────────────────────────────────────────────────────────────────
 function shareScore() {
-  const emojis = state.roundPts.map(p => p >= 2000 ? '🟩' : p > 0 ? '🟨' : '🟥').join('');
+  const emojis = state.roundPts.map(function(p) { return p >= 2000 ? '🟩' : p > 0 ? '🟨' : '🟥'; }).join('');
   const dateStr = new Date().toLocaleDateString('en-US');
-  const text = `✈ AeroGuess Daily — ${dateStr}\nScore: ${state.score.toLocaleString()}/10,000\n\n${emojis}\n\nFAA Part 139 Airport Challenge\naeroguess.com`;
+  const text = '✈ AeroGuess Daily — ' + dateStr + '\nScore: ' + state.score.toLocaleString() + '/10,000\n\n' + emojis + '\n\nFAA Part 139 Airport Challenge';
   if (navigator.share) {
-    navigator.share({ title: 'AeroGuess', text }).catch(() => copyToClipboard(text));
+    navigator.share({ title: 'AeroGuess', text: text }).catch(function() { copyToClipboard(text); });
   } else {
     copyToClipboard(text);
   }
 }
 
 function copyToClipboard(text) {
-  navigator.clipboard.writeText(text).then(() => {
-    alert('Result copied to clipboard! ✈');
-  }).catch(() => {
-    prompt('Copy this result:', text);
-  });
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(function() { alert('Copied! ✈'); });
+  } else {
+    prompt('Copy this:', text);
+  }
 }
 
-// ── Stats ─────────────────────────────────────────────────────────────────────
 function loadStats() {
-  const s = lsGet('ag_stats', { played: 0, wins: 0, streak: 0, lastDate: '' });
+  const s = lsGet('ag_stats', { played: 0, wins: 0, streak: 0 });
   $('st-p').textContent = s.played;
   $('st-w').textContent = s.played ? Math.round(s.wins / s.played * 100) + '%' : '—';
   $('st-s').textContent = s.streak;
   $('s-streak').textContent = s.streak;
 }
 
-function updateStats(won) {
+function updateStats() {
   const s = lsGet('ag_stats', { played: 0, wins: 0, streak: 0, lastDate: '' });
   const today = new Date().toDateString();
   if (s.lastDate !== today) {
     s.played++;
+    const won = state.roundPts.some(function(p) { return p > 0; });
     if (won) s.wins++;
     s.streak = won ? s.streak + 1 : 0;
     s.lastDate = today;
     lsSet('ag_stats', s);
   }
   $('st-p').textContent = s.played;
-  $('st-w').textContent = Math.round(s.wins / s.played * 100) + '%';
+  $('st-w').textContent = s.played ? Math.round(s.wins / s.played * 100) + '%' : '—';
   $('st-s').textContent = s.streak;
   $('s-streak').textContent = s.streak;
 }
 
-// ── Leaderboard ───────────────────────────────────────────────────────────────
 function renderLeaderboard() {
-  const entries = lsGet('ag_lb', []).sort((a, b) => b.score - a.score).slice(0, 20);
+  const entries = lsGet('ag_lb', []).sort(function(a, b) { return b.score - a.score; }).slice(0, 20);
   const body = $('lb-body');
-
   if (!entries.length) {
-    body.innerHTML = `<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--muted);font-family:var(--font-m);font-size:12px;">No scores yet — be the first to post!</td></tr>`;
+    body.innerHTML = '<tr><td colspan="4" style="padding:24px;text-align:center;color:var(--muted);font-family:var(--font-m);font-size:12px;">No scores yet — be the first!</td></tr>';
     return;
   }
-
-  body.innerHTML = entries.map((e, i) => {
-    const rankClass = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
-    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i + 1}`;
-    return `<tr>
-      <td class="lb-rank ${rankClass}">${medal}</td>
-      <td>${e.name}</td>
-      <td class="lb-score">${e.score.toLocaleString()}</td>
-      <td class="lb-date">${e.date}</td>
-    </tr>`;
+  body.innerHTML = entries.map(function(e, i) {
+    const rc = i === 0 ? 'gold' : i === 1 ? 'silver' : i === 2 ? 'bronze' : '';
+    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '#' + (i + 1);
+    return '<tr><td class="lb-rank ' + rc + '">' + medal + '</td><td>' + e.name + '</td><td class="lb-score">' + e.score.toLocaleString() + '</td><td class="lb-date">' + e.date + '</td></tr>';
   }).join('');
 }
 
@@ -452,14 +399,12 @@ function postScore() {
   const name = $('lb-name').value.trim();
   if (!name) return;
   const lb = lsGet('ag_lb', []);
-  lb.push({ name, score: state.score, date: new Date().toLocaleDateString() });
+  lb.push({ name: name, score: state.score, date: new Date().toLocaleDateString() });
   lsSet('ag_lb', lb);
-  $('lb-entry-row').innerHTML = `<div style="font-family:var(--font-m);font-size:12px;color:var(--success);padding:10px 0">✓ Score posted as <strong>${name}</strong></div>`;
+  $('lb-entry-row').innerHTML = '<div style="font-family:var(--font-m);font-size:12px;color:var(--success);padding:10px 0">✓ Posted as <strong>' + name + '</strong></div>';
   renderLeaderboard();
 }
 
-// ── Utility ───────────────────────────────────────────────────────────────────
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+function delay(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
-// ── Kick off ──────────────────────────────────────────────────────────────────
 init();
