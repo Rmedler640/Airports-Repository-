@@ -361,14 +361,15 @@ function showResult(correct, pts, reveal) {
   $('sbtn').disabled = true;
   $('sbtn').textContent = '✓ DONE';
   updateDots();
-  updateStats(correct);
+  // stats updated at end of game
 }
 
-$('next-btn').addEventListener('click', () => startRound(state.completed));
+$('next-btn').addEventListener('click', () => { const next = state.completed; $('rov').classList.remove('show'); startRound(next); });
 
 // ── Final Screen ──────────────────────────────────────────────────────────────
 function showFinal() {
   showScreen('final');
+  updateStats(state.roundPts.some(p => p > 0));
   $('f-score').textContent = state.score;
   $('final-date').textContent = `${new Date().toLocaleDateString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric' })}`;
 
