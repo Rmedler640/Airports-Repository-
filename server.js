@@ -4,6 +4,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
 const AIRPORTS = require('./data/airports');
+const { initDB, saveScore, getScores, getTodayScores } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -323,13 +324,50 @@ app.post('/api/admin/regen', async (req, res) => {
   }
 });
 
+// ── Leaderboard Routes ────────────────────────────────────────────────────────
+
+app.post('/api/scores', async (req, res) => {
+  try {
+    const { name, score, date } = req.body;
+    if (!name || score === undefined) return res.status(400).json({ error: 'Missing name or score' });
+    if (typeof score !== 'number' || score < 0 || score > 10000) return res.status(400).json({ error: 'Invalid score' });
+    const safeName = String(name).slice(0, 20).replace(/[<>]/g, '');
+    await saveScore(safeName, score, date || new Date().toLocaleDateString());
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('/api/scores POST error:', e.message);
+    res.status(500).json({ error: 'Could not save score' });
+  }
+});
+
+app.get('/api/scores', async (req, res) => {
+  try {
+    const today = new Date().toLocaleDateString();
+    const scores = await getTodayScores(today, 50);
+    res.json(scores);
+  } catch (e) {
+    console.error('/api/scores GET error:', e.message);
+    res.status(500).json({ error: 'Could not fetch scores' });
+  }
+});
+
+app.get('/api/scores/all', async (req, res) => {
+  try {
+    const scores = await getScores(100);
+    res.json(scores);
+  } catch (e) {
+    res.status(500).json({ error: 'Could not fetch scores' });
+  }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
+  await initDB();
   console.log(`✈  AeroGuess running on port ${PORT}`);
   console.log(`   ${AIRPORTS.length} airports in database`);
   scheduleMidnightRefresh();
